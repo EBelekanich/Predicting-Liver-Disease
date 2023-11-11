@@ -1,0 +1,215 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook: default
+---
+
+## Loading packages
+
+```{r}
+library(AppliedPredictiveModeling)
+library (tidyverse)
+library(psych)
+library(rpart)
+library (caret)
+library(pamr)
+library(rpart.plot)
+library(pROC)
+library(MLmetrics)
+library(GGally)
+library(imputeMissings)
+```
+
+
+Data Set Information:
+
+This data set contains 416 liver patient records and 167 non liver patient records.The data set was collected from north east of Andhra Pradesh, India. Selector is a class label used to divide into groups(liver patient or not). This data set contains 441 male patient records and 142 female patient records.
+
+Any patient whose age exceeded 89 is listed as being of age "90".
+
+
+Attribute Information:
+
+1. Age Age of the patient
+2. Gender Gender of the patient
+3. TB Total Bilirubin
+4. DB Direct Bilirubin
+5. Alkphos Alkaline Phosphotase
+6. Sgpt Alamine Aminotransferase
+7. Sgot Aspartate Aminotransferase
+8. TP Total Protiens
+9. ALB Albumin
+10. A/G Ratio Albumin and Globulin Ratio
+11. Selector field used to split the data into two sets (labeled by the experts)
+
+
+## Loading dataset
+
+```{r}
+ilpd <- read.csv("Indian Liver Patient Dataset (ILPD).csv",
+               header = FALSE)
+colnames(ilpd) = c("age", "gender", "tb", "db", "alkphos", "sgpt", "sgot", "tp", "alb", "ag_ratio", "selector")
+```
+
+
+## EDA (graphical and non-graphical representations of relationships between response variable and predictor variables)
+
+```{r}
+glimpse(ilpd)
+describeBy(ilpd, "selector")
+```
+
+```{r}
+g1 <- ggpairs(data=ilpd, title="Indian Liver Patient Dataset",
+  mapping=ggplot2::aes(colour = as.factor(selector), alpha=0.5),
+  lower=list(combo=wrap("facethist",binwidth=1)))
+
+g1
+```
+
+
+## Data wrangling and pre-processing (handling of missing values, outliers, correlated features, etc.)
+
+```{r}
+# Creating a Dummy Variable and converting the Outcome in a factor
+df <- ilpd %>% 
+  mutate(male = ifelse(gender == "Male", 1, 0), .after=gender) %>%
+  mutate(selector = as.factor(paste0("G",selector))) %>% 
+  select(-gender)
+
+# Zero- and Near Zero-Variance Predictors
+who = nearZeroVar(df)
+if(length(who) > 0) df <- df[,-who]
+
+# Identifying Correlated Predictors
+who = df %>% 
+  select(-selector) %>% 
+  cor(use="complete.obs") %>% 
+  findCorrelation(cutoff=.75)
+  
+if(length(who) > 0) df <- df[,-who]
+
+# Linear Dependencies
+who = df %>% 
+  select(-selector) %>% 
+  cov(use="complete.obs") %>% 
+  findLinearCombos()
+
+if(length(who$remove) > 0) df <- df[,-who$remove]
+
+# Imputation for missing values
+df <- impute(df)
+
+# Removing Influential Obs by Cooks distance
+mod <- glm(selector ~ ., data=df, family="binomial")
+cooksd <- cooks.distance(mod)
+who <- cooksd > 4*mean(cooksd, na.rm=T)
+
+if(sum(who) > 0) df <- df[-who,]
+
+# Centering and scaling
+df_clean <- df %>% 
+  select(-selector) %>% 
+  scale() %>% 
+  as.data.frame() 
+
+# The outcome
+selector = df$selector
+```
+
+
+## Data splitting (training, validation, and test sets)
+
+```{r}
+set.seed(123)
+## Partition the data with stratified sampling
+training <- createDataPartition(selector, p = .8, list = FALSE)
+## Partition train and test sets
+df_train <- df_clean[training, ]
+df_test <- df_clean[-training, ]
+## Partition for the train and test sets for the response variable
+selector_train <- selector[training]
+selector_test <- selector[-training]
+## Set training control for model building
+ctrl <- trainControl(method = "repeatedcv", 10, 
+                     repeats = 10, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = TRUE, 
+                     savePredictions = TRUE)
+```
+
+KNN Model
+
+```{r}
+set.seed(476)
+knnFit <- train(x = df_train, 
+               y = selector_train,
+               method = "knn",
+               metric = "ROC",
+               trControl = ctrl)
+knnFit
+knnFit$finalModel
+```
+
+## Validation and testing (model tuning and evaluation)
+
+```{r}
+# we will make a grid of values to test in cross-validation.
+knnGrid <-  expand.grid(k = c(1:50))
+
+set.seed(476)
+knnFitTune <- train(x = df_train, 
+               y = selector_train,
+               method = "knn",
+               metric = "ROC",
+               tuneGrid = knnGrid,
+               trControl = ctrl)
+knnFitTune
+```
+
+```{r}
+plot(knnFitTune)
+```
+
+```{r}
+knnFitTune$finalModel
+```
+
+
+## Results and final model selection (performance measures, etc.)
+
+```{r}
+knnCM <- confusionMatrix(knnFitTune, norm = "none")
+knnCM
+
+## Plot the ROC curve for the hold-out set
+knnRoc <- roc(response = knnFitTune$pred$obs,
+             predictor = knnFitTune$pred$G1,
+             levels = levels(knnFitTune$pred$obs))
+```
+
+```{r}
+plot(knnRoc, legacy.axes = TRUE)
+knnRoc$auc
+```
+
+```{r}
+knnImp <- varImp(knnFitTune, scale = FALSE)
+plot(knnImp)
+```
+
+## Score Test Data
+
+```{r}
+# let's score the test set using this model
+pred_class <- predict(knnFitTune, df_test,'raw')
+probs <- predict(knnFitTune, df_test,'prob')
+
+# Merge original scaled test dataset with predicions
+df_test.scored <- cbind(df[-training,], pred_class, probs)
+
+glimpse(df_test.scored)
+```
+
+
